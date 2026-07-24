@@ -3,6 +3,7 @@
 import { useRef, useState } from 'react'
 import { DashboardHeader } from '@/components/dashboard-header'
 import { UploadDropzone } from '@/components/upload-dropzone'
+import { ReviewQueue } from '@/components/review-queue'
 import { VendorsDirectory } from '@/components/vendors-directory'
 import { WorkspaceTabs, type WorkspaceTab } from '@/components/workspace-tabs'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -77,9 +78,9 @@ export default function Page() {
           ) : null}
 
           {activeTab === 'review' ? (
-            <PlaceholderPanel
-              title="Split-screen review interface"
-              detail="Ingestion already writes low-confidence matches, carrier switches, and policy conflicts to review_queue_items. The certificate-versus-vendor split-screen and 1-click resolution land in the next iteration."
+            <ReviewQueue
+              refreshKey={refreshKey}
+              onResolved={() => setRefreshKey((key) => key + 1)}
             />
           ) : null}
 
