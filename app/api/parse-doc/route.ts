@@ -3,6 +3,8 @@ import OpenAI from 'openai'
 import { zodTextFormat } from 'openai/helpers/zod'
 import { z } from 'zod'
 import { createSupabaseServerClient } from '@/lib/supabase/server'
+import { normalizeVendorName } from '@/lib/compliance/normalize'
+import { COVERAGE_LABELS } from '@/lib/compliance/status'
 
 // This is the canonical, policy_lines-ready extraction contract.  The only
 // nullable field is NAIC because some certificates do not print it legibly.
@@ -19,6 +21,10 @@ const DocSchema = z.object({
   vendor_name: z.string().describe('The Insured name. Do not extract the Producer or Agency name.'),
   address_street: z.string().nullable(),
   address_zip: z.string().nullable(),
+  primary_email: z
+    .string()
+    .nullable()
+    .describe('Email address of the Insured, never the producer. Null when absent.'),
   coverages: z.array(CoverageSchema),
 })
 
@@ -28,27 +34,19 @@ type ReviewReason = {
   type:
     | 'ADDRESS_MISMATCH'
     | 'FUZZY_MATCH'
+    | 'LOW_CONFIDENCE_MATCH'
     | 'CARRIER_SWITCH'
     | 'POLICY_CONFLICT'
     | 'MISSING_POLICY_DATA'
   details: Record<string, unknown>
 }
 
-function normalizeName(value: string) {
-  return value
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, ' ')
-    .trim()
-    .replace(/\s+/g, ' ')
-}
-
-function displayCoverageType(value: ParsedDocument['coverages'][number]['coverage_type']) {
-  return {
-    GL: 'General Liability',
-    AUTO: 'Auto Liability',
-    WORKERS_COMP: 'Workers Compensation',
-    UMBRELLA: 'Umbrella Liability',
-  }[value]
+// A certificate rarely carries the Insured's email, but vendors.primary_email is
+// mandatory. The placeholder keeps ingestion moving and is surfaced in Tab 1 and
+// the review queue so a Risk Manager can supply the real contact.
+function placeholderEmail(normalizedName: string) {
+  const slug = normalizedName.replace(/\s+/g, '-').slice(0, 40) || 'vendor'
+  return `unverified+${slug}-${crypto.randomUUID().slice(0, 8)}@pending.local`
 }
 
 function dateOrToday(value: string | null) {
@@ -69,6 +67,7 @@ function isExactPolicyDuplicate(
   )
 }
 
+// PRD 3.2 "Same Carrier + New Policy #" only auto-replaces expiring coverage.
 function isExpiringOrExpired(date: string) {
   const cutoff = new Date()
   cutoff.setDate(cutoff.getDate() + 30)
@@ -96,7 +95,7 @@ Use the INSURED party as vendor_name, never the producer or agency. Extract only
 GL, AUTO, WORKERS_COMP, and UMBRELLA coverages. Normalize coverage_type to the
 schema enum. limit_amount must be a number in US dollars with no symbols or
 commas. Use YYYY-MM-DD dates. Return null, never a guess, for an unreadable
-policy_number, NAIC code, or effective date.`,
+policy_number, NAIC code, effective date, or Insured email.`,
           },
           isPdf
             ? {
@@ -126,7 +125,7 @@ export async function POST(req: Request) {
 
     const parsed = await extractDocument(fileUrl, originalFilename, mimeType)
     const supabase = createSupabaseServerClient()
-    const normalizedName = normalizeName(parsed.vendor_name)
+    const normalizedName = normalizeVendorName(parsed.vendor_name)
     const reviewReasons: ReviewReason[] = []
     let vendorId: string | null = null
 
@@ -232,14 +231,37 @@ export async function POST(req: Request) {
       }
     }
 
-    // A below-threshold or conflicting match is retained as a source document and
-    // queue item, but does not create a new vendor or attach policy records.
-    const isPendingReview = !vendorId || reviewReasons.length > 0
+    // Provisioning: when all three tiers miss, the Insured block becomes a real
+    // vendor so that ingestion always terminates in queryable data. The review
+    // item is a notification, not a gate.
+    let provisionedVendor = false
+    if (!vendorId) {
+      const { data: created, error: createError } = await supabase
+        .from('vendors')
+        .insert({
+          company_name: parsed.vendor_name,
+          normalized_name: normalizedName,
+          primary_email: parsed.primary_email?.trim() || placeholderEmail(normalizedName),
+          trade_specialty: 'Unclassified',
+          address_street: parsed.address_street,
+          address_zip: parsed.address_zip,
+        })
+        .select('vendor_id')
+        .single()
+      if (createError) throw new Error(`Unable to provision vendor: ${createError.message}`)
 
-    if (isPendingReview && reviewReasons.length === 0) {
+      vendorId = created.vendor_id
+      provisionedVendor = true
       reviewReasons.push({
-        type: 'FUZZY_MATCH',
-        details: { normalized_name: normalizedName, confidence_score: 0, threshold: 90 },
+        type: 'LOW_CONFIDENCE_MATCH',
+        details: {
+          reason: 'No existing vendor matched; a new vendor profile was provisioned from the certificate',
+          provisioned_vendor_id: vendorId,
+          normalized_name: normalizedName,
+          company_name: parsed.vendor_name,
+          contact_email_verified: Boolean(parsed.primary_email?.trim()),
+          trade_specialty_verified: false,
+        },
       })
     }
 
@@ -256,7 +278,7 @@ export async function POST(req: Request) {
           .sort()[0] ?? null,
         policy_amount: String(Math.max(0, ...parsed.coverages.map((coverage) => coverage.limit_amount))),
         coverages: parsed.coverages.map((coverage) => ({
-          type: displayCoverageType(coverage.coverage_type),
+          type: COVERAGE_LABELS[coverage.coverage_type],
           policy_number: coverage.policy_number ?? 'Unverified',
           expiration_date: coverage.expiration_date,
           limits: `$${coverage.limit_amount.toLocaleString('en-US')}`,
@@ -273,7 +295,7 @@ export async function POST(req: Request) {
     if (documentError) throw new Error(`Unable to save document: ${documentError.message}`)
 
     for (const [index, coverage] of parsed.coverages.entries()) {
-      if (!vendorId || isPendingReview) break
+      if (!vendorId) break
       const type = coverage.coverage_type
       const policyNumber = coverage.policy_number?.trim()
       const naicCode = coverage.naic_code?.trim()
@@ -299,15 +321,25 @@ export async function POST(req: Request) {
       const limitAmount = coverage.limit_amount
       if (existing) {
         if (coverage.expiration_date > existing.expiration_date) {
-          const { error } = await supabase
+          // Same Carrier Renewal (PRD 3.2): archive the superseded line so the
+          // pre-renewal limits and dates survive as an audit record, then
+          // activate the renewed line.
+          const { error: archiveError } = await supabase
             .from('policy_lines')
-            .update({
-              source_document_id: documentId,
-              limit_amount: limitAmount,
-              effective_date: dateOrToday(coverage.effective_date),
-              expiration_date: coverage.expiration_date,
-            })
+            .update({ is_active: false })
             .eq('policy_id', existing.policy_id)
+          if (archiveError) throw new Error(`Unable to archive renewed policy: ${archiveError.message}`)
+
+          const { error } = await supabase.from('policy_lines').insert({
+            vendor_id: vendorId,
+            source_document_id: documentId,
+            policy_number: policyNumber,
+            naic_code: naicCode,
+            coverage_type: type,
+            limit_amount: limitAmount,
+            effective_date: dateOrToday(coverage.effective_date),
+            expiration_date: coverage.expiration_date,
+          })
           if (error) throw new Error(`Unable to renew policy line: ${error.message}`)
         } else if (coverage.expiration_date !== existing.expiration_date || limitAmount !== Number(existing.limit_amount)) {
           reviewReasons.push({
@@ -352,11 +384,16 @@ export async function POST(req: Request) {
         }
 
         const activeLine = activeCoverageLines[0]
-        if (!isExpiringOrExpired(activeLine.expiration_date)) {
+        const isCarrierSwitch = activeLine.naic_code !== naicCode
+
+        // Same Carrier + New Policy # (PRD 3.2) requires expiring coverage; a
+        // mid-term same-carrier policy change is a genuine conflict. A carrier
+        // switch carries no such condition and applies at any point in the term.
+        if (!isCarrierSwitch && !isExpiringOrExpired(activeLine.expiration_date)) {
           reviewReasons.push({
             type: 'POLICY_CONFLICT',
             details: {
-              reason: 'Incoming policy conflicts with a non-expiring active policy',
+              reason: 'Incoming same-carrier policy conflicts with a non-expiring active policy',
               existing_policy_id: activeLine.policy_id,
               incoming_policy_number: policyNumber,
               incoming_naic_code: naicCode,
@@ -365,22 +402,13 @@ export async function POST(req: Request) {
           continue
         }
 
-        // Same carrier with a new policy number: archive the expiring line and
-        // activate the incoming renewal/replacement.
-        if (activeLine.naic_code === naicCode) {
-          const { error: archiveError } = await supabase
-            .from('policy_lines')
-            .update({ is_active: false })
-            .eq('policy_id', activeLine.policy_id)
-          if (archiveError) throw new Error(`Unable to archive prior policy: ${archiveError.message}`)
-        } else {
-          // Carrier switch: perform the prescribed replacement and notify the
-          // pending review queue so a manager can inspect the change.
-          const { error: archiveError } = await supabase
-            .from('policy_lines')
-            .update({ is_active: false })
-            .eq('policy_id', activeLine.policy_id)
-          if (archiveError) throw new Error(`Unable to archive prior carrier policy: ${archiveError.message}`)
+        const { error: archiveError } = await supabase
+          .from('policy_lines')
+          .update({ is_active: false })
+          .eq('policy_id', activeLine.policy_id)
+        if (archiveError) throw new Error(`Unable to archive prior policy: ${archiveError.message}`)
+
+        if (isCarrierSwitch) {
           reviewReasons.push({
             type: 'CARRIER_SWITCH',
             details: {
@@ -388,6 +416,7 @@ export async function POST(req: Request) {
               previous_policy_id: activeLine.policy_id,
               previous_naic_code: activeLine.naic_code,
               incoming_naic_code: naicCode,
+              mid_term: !isExpiringOrExpired(activeLine.expiration_date),
             },
           })
         }
@@ -431,6 +460,9 @@ export async function POST(req: Request) {
 
     return NextResponse.json({
       document: { ...document, extraction_status: extractionStatus, vendor_id: vendorId },
+      vendor_id: vendorId,
+      provisioned_vendor: provisionedVendor,
+      review_reasons: reviewReasons.map((reason) => reason.type),
       extraction: parsed,
     })
   } catch (error: unknown) {

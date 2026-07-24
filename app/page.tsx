@@ -1,86 +1,96 @@
 'use client'
 
 import { useRef, useState } from 'react'
-import { DashboardSidebar } from '@/components/dashboard-sidebar'
 import { DashboardHeader } from '@/components/dashboard-header'
 import { UploadDropzone } from '@/components/upload-dropzone'
-import { SummaryCards } from '@/components/summary-cards'
-import { DocumentsTable } from '@/components/documents-table'
+import { VendorsDirectory } from '@/components/vendors-directory'
+import { WorkspaceTabs, type WorkspaceTab } from '@/components/workspace-tabs'
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 
-const pageTitles: Record<string, { title: string; subtitle: string }> = {
-  dashboard: {
-    title: 'Compliance Overview',
+const tabCopy: Record<WorkspaceTab, { title: string; subtitle: string }> = {
+  vendors: {
+    title: 'Master Vendors',
     subtitle:
-      'Monitor subcontractor documents and stay ahead of expirations.',
+      'Every onboarded subcontractor, their active policy lines, and their live compliance status.',
   },
-  subcontractors: {
-    title: 'Subcontractors',
-    subtitle: 'Manage your network of subcontractors and their documents.',
+  review: {
+    title: 'Review Queue',
+    subtitle:
+      'Low-confidence matches, carrier switches, and policy conflicts awaiting Risk Manager clearance.',
   },
-  alerts: {
-    title: 'Expiration Alerts',
-    subtitle: 'Documents that need renewal or immediate attention.',
-  },
-  settings: {
-    title: 'Settings',
-    subtitle: 'Configure notifications, users, and workspace preferences.',
+  projects: {
+    title: 'Projects',
+    subtitle:
+      'Project lineups, project-specific insurance requirements, and jobsite gatekeeper access.',
   },
 }
 
+function PlaceholderPanel({ title, detail }: { title: string; detail: string }) {
+  return (
+    <Card className="border border-dashed border-border shadow-none">
+      <CardHeader>
+        <CardTitle className="text-lg font-semibold tracking-tight">{title}</CardTitle>
+      </CardHeader>
+      <CardContent className="text-sm text-muted-foreground">{detail}</CardContent>
+    </Card>
+  )
+}
+
 export default function Page() {
-  const [activeNav, setActiveNav] = useState('dashboard')
-  const [tableRefreshKey, setTableRefreshKey] = useState(0)
+  const [activeTab, setActiveTab] = useState<WorkspaceTab>('vendors')
+  const [refreshKey, setRefreshKey] = useState(0)
   const uploadRef = useRef<HTMLDivElement>(null)
 
   const scrollToUpload = () => {
-    setActiveNav('dashboard')
+    setActiveTab('vendors')
     requestAnimationFrame(() => {
       uploadRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
     })
   }
 
-  const { title, subtitle } = pageTitles[activeNav] ?? pageTitles.dashboard
+  const { title, subtitle } = tabCopy[activeTab]
 
   return (
-    <div className="flex min-h-screen bg-background text-foreground antialiased">
-      {/* Sidebar - hides/drawers automatically on mobile if handled internally */}
-      <DashboardSidebar active={activeNav} onNavigate={setActiveNav} />
+    <div className="flex min-h-screen flex-col bg-background text-foreground antialiased">
+      <DashboardHeader onUpload={scrollToUpload} />
 
-      <div className="flex min-w-0 flex-1 flex-col">
-        <DashboardHeader onUpload={scrollToUpload} />
+      <main className="flex-1 px-4 py-5 md:px-8 md:py-8">
+        <div className="mx-auto flex w-full max-w-[1600px] flex-col gap-6 md:gap-8">
+          <WorkspaceTabs active={activeTab} onChange={setActiveTab} />
 
-        {/* Dynamic padding: Compact on mobile (px-4 py-5), spacious on desktop (md:px-8 md:py-8) */}
-        <main className="flex-1 px-4 py-5 md:px-8 md:py-8">
-          {/* Main Container: Stretches up to 1600px without blank margins */}
-          <div className="mx-auto flex w-full max-w-[1600px] flex-col gap-6 md:gap-8">
-            
-            {/* Header section with responsive fluid typography */}
-            <div>
-              <h2 className="text-2xl sm:text-3xl lg:text-4xl font-bold tracking-tight text-foreground text-balance">
-                {title}
-              </h2>
-              <p className="mt-1 sm:mt-2 text-sm sm:text-base lg:text-lg text-muted-foreground">
-                {subtitle}
-              </p>
-            </div>
-
-            {/* Upload Area */}
-            <div ref={uploadRef}>
-              <UploadDropzone
-                onUploadComplete={() =>
-                  setTableRefreshKey((key) => key + 1)
-                }
-              />
-            </div>
-
-            {/* Summary KPI Cards */}
-            <SummaryCards refreshKey={tableRefreshKey} />
-
-            {/* Main Documents Table */}
-            <DocumentsTable refreshKey={tableRefreshKey} />
+          <div>
+            <h2 className="text-2xl font-bold tracking-tight text-balance text-foreground sm:text-3xl lg:text-4xl">
+              {title}
+            </h2>
+            <p className="mt-1 text-sm text-muted-foreground sm:mt-2 sm:text-base lg:text-lg">
+              {subtitle}
+            </p>
           </div>
-        </main>
-      </div>
+
+          {activeTab === 'vendors' ? (
+            <>
+              <div ref={uploadRef}>
+                <UploadDropzone onUploadComplete={() => setRefreshKey((key) => key + 1)} />
+              </div>
+              <VendorsDirectory refreshKey={refreshKey} />
+            </>
+          ) : null}
+
+          {activeTab === 'review' ? (
+            <PlaceholderPanel
+              title="Split-screen review interface"
+              detail="Ingestion already writes low-confidence matches, carrier switches, and policy conflicts to review_queue_items. The certificate-versus-vendor split-screen and 1-click resolution land in the next iteration."
+            />
+          ) : null}
+
+          {activeTab === 'projects' ? (
+            <PlaceholderPanel
+              title="Projects view and lineup builder"
+              detail="Project records, vendor lineups, per-project GL/Umbrella overrides, and the jobsite gatekeeper URL land in the next iteration. Project requirements will feed the shared compliance evaluator already used by this directory."
+            />
+          ) : null}
+        </div>
+      </main>
     </div>
   )
 }
