@@ -10,6 +10,9 @@ where effective_limit_amount is null;
 alter table public.policy_lines
   alter column effective_limit_amount set not null;
 
+alter table public.policy_lines 
+  drop constraint if exists policy_lines_effective_limit_check;
+
 alter table public.policy_lines
   add constraint policy_lines_effective_limit_check
   check (effective_limit_amount >= 0) not valid;

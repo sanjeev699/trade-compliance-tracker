@@ -18,20 +18,26 @@ export type ComplianceStatus =
   | 'UNDER_LIMIT'
   | 'EXPIRED'
   | 'MISSING_DOCUMENT'
+  | 'REJECTED'
+  | 'MISSING_DATA'
 
 export const EXPIRING_SOON_WINDOW_DAYS = 30
 
 // Worst status wins when a vendor's coverages are rolled up into one badge.
 const SEVERITY: Record<ComplianceStatus, number> = {
-  EXPIRED: 0,
-  MISSING_DOCUMENT: 1,
-  UNDER_LIMIT: 2,
-  EXPIRING_SOON: 3,
-  COMPLIANT: 4,
+  REJECTED: 0,
+  EXPIRED: 1,
+  MISSING_DOCUMENT: 2,
+  MISSING_DATA: 3,
+  UNDER_LIMIT: 4,
+  EXPIRING_SOON: 5,
+  COMPLIANT: 6,
 }
 
 export interface PolicyLineSnapshot {
-  policy_id?: string
+  id?: string
+  document_id?: string
+  status?: 'APPROVED' | 'EXPIRED' | 'REJECTED' | 'MISSING_DATA' | null
   coverage_type: CoverageType
   policy_number?: string
   naic_code?: string
@@ -70,6 +76,39 @@ export interface ComplianceEvaluation {
   earliest_expiration: string | null
 }
 
+export type VendorGlobalStatus = 'CLEAR' | 'REVIEW_NEEDED' | 'ON_HOLD'
+
+export function evaluateVendorGlobalStatus(
+  insuranceStatus: ComplianceStatus,
+  w9Status: 'PENDING' | 'VERIFIED' | 'REJECTED' = 'PENDING',
+  msaStatus: 'PENDING' | 'VERIFIED' | 'REJECTED' = 'PENDING',
+  emrScore: number | null = null
+): VendorGlobalStatus {
+  // Any critical failure puts them On Hold
+  if (
+    insuranceStatus === 'EXPIRED' ||
+    insuranceStatus === 'MISSING_DOCUMENT' ||
+    insuranceStatus === 'UNDER_LIMIT' ||
+    w9Status === 'REJECTED' ||
+    w9Status === 'PENDING' ||
+    msaStatus === 'REJECTED' ||
+    msaStatus === 'PENDING' ||
+    (emrScore !== null && emrScore > 1.15)
+  ) {
+    return 'ON_HOLD'
+  }
+
+  // Any warning puts them in Review Needed
+  if (
+    insuranceStatus === 'EXPIRING_SOON' ||
+    (emrScore !== null && emrScore > 1.0)
+  ) {
+    return 'REVIEW_NEEDED'
+  }
+
+  return 'CLEAR'
+}
+
 function startOfDay(date: Date): Date {
   const copy = new Date(date)
   copy.setHours(0, 0, 0, 0)
@@ -98,7 +137,7 @@ function governingLine(
   coverage: CoverageType,
 ): PolicyLineSnapshot | null {
   const candidates = lines.filter(
-    (line) => line.coverage_type === coverage && line.is_active !== false,
+    (line) => line.coverage_type === coverage && line.is_active !== false
   )
   if (candidates.length === 0) return null
   return candidates.reduce((latest, line) =>
@@ -133,7 +172,9 @@ export function evaluateCoverage(
 
   // Hard expiration enforcement at T+1 (PRD 4.1.4).
   let status: ComplianceStatus = 'COMPLIANT'
-  if (remainingDays < 0) status = 'EXPIRED'
+  if (policy.status === 'REJECTED') status = 'REJECTED'
+  else if (policy.status === 'MISSING_DATA') status = 'MISSING_DATA'
+  else if (policy.status === 'EXPIRED' || remainingDays < 0) status = 'EXPIRED'
   else if (effectiveLimit < requiredLimit) status = 'UNDER_LIMIT'
   else if (remainingDays < EXPIRING_SOON_WINDOW_DAYS) status = 'EXPIRING_SOON'
 
@@ -151,6 +192,7 @@ export function evaluateCompliance(
   lines: PolicyLineSnapshot[],
   requirements: ComplianceRequirements = GLOBAL_GC_REQUIREMENTS,
   today: Date = new Date(),
+  hasCoiDoc: boolean = true,
 ): ComplianceEvaluation {
   const evaluated = COVERAGE_TYPES.filter(
     (coverage) =>
@@ -175,7 +217,9 @@ export function evaluateCompliance(
     .filter((value): value is string => Boolean(value))
     .sort()
 
-  return { status, coverages: evaluated, earliest_expiration: expirations[0] ?? null }
+  const finalStatus = hasCoiDoc ? status : 'MISSING_DOCUMENT'
+
+  return { status: finalStatus, coverages: evaluated, earliest_expiration: expirations[0] ?? null }
 }
 
 export function compareBySeverity(a: ComplianceStatus, b: ComplianceStatus): number {

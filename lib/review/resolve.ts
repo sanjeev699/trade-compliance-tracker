@@ -87,7 +87,7 @@ async function applyCoverages(
 
     const { data: activeLines, error: activeError } = await supabase
       .from('policy_lines')
-      .select('policy_id, policy_number, naic_code')
+      .select('id:policy_id, policy_number, naic_code')
       .eq('vendor_id', vendorId)
       .eq('coverage_type', coverage.coverage_type)
       .eq('is_active', true)
@@ -97,8 +97,8 @@ async function applyCoverages(
       (line) => line.policy_number === policyNumber && line.naic_code === naicCode,
     )
     const supersededIds = (activeLines ?? [])
-      .filter((line) => line.policy_id !== sameLine?.policy_id)
-      .map((line) => line.policy_id)
+      .filter((line) => line.id !== sameLine?.id)
+      .map((line) => line.id)
 
     if (supersededIds.length > 0) {
       const { error } = await supabase
@@ -110,7 +110,7 @@ async function applyCoverages(
 
     const values = {
       vendor_id: vendorId,
-      source_document_id: documentId,
+      document_id: documentId,
       policy_number: policyNumber,
       naic_code: naicCode,
       coverage_type: coverage.coverage_type,
@@ -121,7 +121,7 @@ async function applyCoverages(
     }
 
     const { error } = sameLine
-      ? await supabase.from('policy_lines').update(values).eq('policy_id', sameLine.policy_id)
+      ? await supabase.from('policy_lines').update(values).eq('policy_id', sameLine.id)
       : await supabase.from('policy_lines').insert(values)
     if (error) throw new Error(`Unable to save policy line: ${error.message}`)
   }
@@ -136,10 +136,10 @@ async function discardOrphanProvisionedVendor(
 ) {
   const { data: policyLines, error: policyError } = await supabase
     .from('policy_lines')
-    .select('policy_id, source_document_id')
+    .select('id, document_id')
     .eq('vendor_id', vendorId)
   if (policyError) throw new Error(`Unable to inspect vendor policies: ${policyError.message}`)
-  if ((policyLines ?? []).some((line) => line.source_document_id !== documentId)) return
+  if ((policyLines ?? []).some((line) => line.document_id !== documentId)) return
 
   const { count: documentCount, error: documentError } = await supabase
     .from('documents')
@@ -218,7 +218,7 @@ export async function rejectReviewItem(
   const { error: archiveError } = await supabase
     .from('policy_lines')
     .update({ is_active: false })
-    .eq('source_document_id', item.document_id)
+    .eq('document_id', item.document_id)
     .eq('is_active', true)
   if (archiveError) throw new Error(`Unable to archive rejected policies: ${archiveError.message}`)
 

@@ -1,0 +1,2 @@
+ALTER TABLE public.vendors
+  ADD COLUMN IF NOT EXISTS phone_number VARCHAR(30) NULL;

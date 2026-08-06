@@ -9,6 +9,8 @@ export type ReviewType =
   | 'POLICY_CONFLICT'
   | 'MISSING_POLICY_DATA'
   | 'MANUAL_OVERRIDE'
+  | 'INVALID_DOCUMENT_FORMAT'
+  | 'ENTITY_MISMATCH'
 
 export type ReviewStatus = 'PENDING' | 'IN_REVIEW' | 'RESOLVED' | 'DISMISSED'
 
@@ -66,11 +68,13 @@ export interface ReviewQueueItem {
   review_id: string
   review_type: ReviewType
   status: ReviewStatus
+  vendor_id?: string | null
   confidence_score: string | number | null
   details: Record<string, unknown>
+  notes?: string | null
   created_at: string
   document: ReviewDocument
-  vendor: VendorWithCompliance | null
+  vendor: { vendor_id: string; company_name: string; sc_id?: string | null } | null
   candidate_vendors: VendorSummary[]
 }
 

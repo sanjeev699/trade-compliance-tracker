@@ -26,12 +26,22 @@ export const statusPresentation: Record<
   EXPIRED: {
     label: 'Expired',
     icon: TriangleAlert,
-    className: 'border-red-600/30 bg-red-600/10 text-red-700 dark:text-red-400',
+    className: 'border-rose-200/80 bg-rose-50 text-rose-700 dark:text-rose-400',
   },
   MISSING_DOCUMENT: {
     label: 'Missing Document',
     icon: CircleDashed,
     className: 'border-slate-500/30 bg-slate-500/10 text-slate-600 dark:text-slate-300',
+  },
+  REJECTED: {
+    label: 'Rejected',
+    icon: CircleAlert,
+    className: 'border-rose-200/80 bg-rose-50 text-rose-700 dark:text-rose-400',
+  },
+  MISSING_DATA: {
+    label: 'Incomplete Data',
+    icon: TriangleAlert,
+    className: 'border-amber-600/30 bg-amber-600/10 text-amber-700 dark:text-amber-400',
   },
 }
 
@@ -44,13 +54,14 @@ export function ComplianceStatusBadge({
   label?: string
   className?: string
 }) {
-  const { label: defaultLabel, icon: Icon, className: statusClass } = statusPresentation[status]
+  const config = statusPresentation[status]
+  const { label: defaultLabel, icon: Icon } = config
 
   return (
     <span
       className={cn(
-        'inline-flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-xs font-medium whitespace-nowrap',
-        statusClass,
+        'inline-flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-xs font-medium',
+        config.className,
         className,
       )}
     >

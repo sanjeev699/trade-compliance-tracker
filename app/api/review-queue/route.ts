@@ -1,17 +1,22 @@
+export const dynamic = 'force-dynamic'
 import { NextResponse } from 'next/server'
 import { createSupabaseServerClient } from '@/lib/supabase/server'
-import { evaluateCompliance } from '@/lib/compliance/status'
+import { evaluateCompliance, evaluateVendorGlobalStatus } from '@/lib/compliance/status'
 import type { VendorRow, VendorWithCompliance } from '@/lib/types/vendor'
 import type { ReviewDocument, ReviewQueueItem, VendorSummary } from '@/lib/types/review'
 
 const VENDOR_SELECT = `
   vendor_id, company_name, normalized_name, tax_id_ein, primary_email,
   trade_specialty, address_street, address_zip, emr_score, emr_verified,
-  osha_file_url, created_at, updated_at,
+  osha_file_url, onboarding_status, created_at, updated_at,
   policy_lines (
-    policy_id, coverage_type, policy_number, naic_code, limit_amount,
-    effective_limit_amount, effective_date, expiration_date, is_active
-  )
+    id:policy_id, coverage_type, policy_number, naic_code, limit_amount,
+    effective_limit_amount, effective_date, expiration_date, is_active,
+    addl_insr, subr_wvd, employers_liability_ea_acc,
+    employers_liability_disease_ea_emp, employers_liability_disease_policy_limit
+  ),
+  documents ( description_of_operations, doc_type, file_url, original_filename, extraction_status ),
+  review_queue_items ( status )
 `
 
 interface QueueRow {
@@ -40,7 +45,19 @@ function candidateIdsFrom(details: Record<string, unknown> | null): string[] {
 
 function withCompliance(vendor: VendorRow): VendorWithCompliance {
   const activeLines = (vendor.policy_lines ?? []).filter((line) => line.is_active)
-  return { ...vendor, policy_lines: activeLines, compliance: evaluateCompliance(activeLines) }
+
+  const hasCoi = !!vendor.acord25_url || (vendor.documents || []).some(d => 
+    d.doc_type === 'COI' || d.doc_type === 'ACORD 25' || d.doc_type === 'Certificate of Insurance (COI / ACORD 25)'
+  )
+
+  const compliance = evaluateCompliance(activeLines as any, undefined, undefined, hasCoi)
+  const global_status = evaluateVendorGlobalStatus(
+    compliance.status,
+    vendor.w9_status,
+    vendor.msa_status,
+    typeof vendor.emr_score === 'number' ? vendor.emr_score : null
+  )
+  return { ...vendor, policy_lines: activeLines, compliance, global_status }
 }
 
 export async function GET() {
@@ -50,65 +67,39 @@ export async function GET() {
       .from('review_queue_items')
       .select(
         `review_id, review_type, status, confidence_score, details, created_at, vendor_id,
-         documents ( id, company_name, doc_type, file_url, original_filename,
-                     mime_type, extraction_status, extracted_data, created_at )`,
+         documents!inner ( id, company_name, doc_type, file_url, original_filename,
+                     mime_type, extraction_status, extracted_data, created_at ),
+         vendors!inner ( vendor_id, company_name, sc_id )`
       )
       .in('status', ['PENDING', 'IN_REVIEW'])
       .order('created_at', { ascending: true })
-    if (error) throw new Error(error.message)
 
-    const rows = (data ?? []) as unknown as (QueueRow & { vendor_id: string | null })[]
-
-    // One vendor lookup covers both the linked vendor and every near-match
-    // candidate referenced by the open items.
-    const vendorIds = new Set<string>()
-    for (const row of rows) {
-      if (row.vendor_id) vendorIds.add(row.vendor_id)
-      for (const id of candidateIdsFrom(row.details)) vendorIds.add(id)
+    if (error) {
+      console.error('Review Queue Error:', error.message)
+      return NextResponse.json({ items: [] })
     }
 
-    const vendorsById = new Map<string, VendorWithCompliance>()
-    if (vendorIds.size > 0) {
-      const { data: vendorRows, error: vendorError } = await supabase
-        .from('vendors')
-        .select(VENDOR_SELECT)
-        .in('vendor_id', Array.from(vendorIds))
-      if (vendorError) throw new Error(vendorError.message)
-      for (const vendor of (vendorRows ?? []) as unknown as VendorRow[]) {
-        vendorsById.set(vendor.vendor_id, withCompliance(vendor))
-      }
-    }
+    const rows = (data ?? []) as any[]
 
-    const toSummary = (vendor: VendorWithCompliance): VendorSummary => ({
-      vendor_id: vendor.vendor_id,
-      company_name: vendor.company_name,
-      trade_specialty: vendor.trade_specialty,
-      primary_email: vendor.primary_email,
-      tax_id_ein: vendor.tax_id_ein,
-      address_street: vendor.address_street,
-      address_zip: vendor.address_zip,
-    })
-
-    const items: ReviewQueueItem[] = rows
-      .filter((row) => row.documents !== null)
-      .map((row) => ({
-        review_id: row.review_id,
-        review_type: row.review_type,
-        status: row.status,
-        confidence_score: row.confidence_score,
-        details: row.details ?? {},
-        created_at: row.created_at,
-        document: row.documents as ReviewDocument,
-        vendor: row.vendor_id ? (vendorsById.get(row.vendor_id) ?? null) : null,
-        candidate_vendors: candidateIdsFrom(row.details)
-          .map((id) => vendorsById.get(id))
-          .filter((vendor): vendor is VendorWithCompliance => Boolean(vendor))
-          .map(toSummary),
-      }))
+    const items: ReviewQueueItem[] = rows.map((row) => ({
+      review_id: row.review_id,
+      review_type: row.review_type,
+      status: row.status,
+      confidence_score: row.confidence_score,
+      details: row.details ?? {},
+      created_at: row.created_at,
+      document: row.documents as ReviewDocument,
+      vendor: row.vendors ? {
+        vendor_id: row.vendors.vendor_id,
+        company_name: row.vendors.company_name,
+        sc_id: row.vendors.sc_id
+      } : null,
+      candidate_vendors: []
+    }))
 
     return NextResponse.json({ items })
   } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : 'Unable to load review queue'
-    return NextResponse.json({ error: message }, { status: 500 })
+    console.error('Review Queue Exception:', error)
+    return NextResponse.json({ items: [] })
   }
 }
